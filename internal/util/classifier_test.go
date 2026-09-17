@@ -1093,6 +1093,61 @@ func TestClassifyHTTPResponse400IsModelScoped(t *testing.T) {
 	}
 }
 
+func TestIsRequestGlobalClientError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{
+			name:   "empty text 400 is provider-local",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`,
+		},
+		{
+			name:   "max_tokens 400 is provider-local",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 324000 > 128000, which is the maximum allowed number of output tokens for claude-opus-5"}}`,
+		},
+		{
+			name:   "403 permission is provider-local",
+			status: http.StatusForbidden,
+			body:   `{"error":{"type":"permission_error","message":"request illegal"}}`,
+		},
+		{
+			name:   "413 request too large is provider-local",
+			status: http.StatusRequestEntityTooLarge,
+			body:   `{"code":"RequestTooLarge","message":"Request body size exceeds maximum allowed size"}`,
+		},
+		{
+			name:   "context length 400 is request-global",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`,
+			want:   true,
+		},
+		{
+			name:   "websocket 413 message_too_big is request-global",
+			status: http.StatusRequestEntityTooLarge,
+			body:   `{"type":"error","status":413,"error":{"type":"invalid_request_error","code":"message_too_big","message":"upstream websocket message too big"}}`,
+			want:   true,
+		},
+		{
+			name:   "message_too_big only in text is still provider-local",
+			status: http.StatusRequestEntityTooLarge,
+			body:   `{"error":{"code":"RequestTooLarge","message":"message_too_big"}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRequestGlobalClientError(tt.status, []byte(tt.body)); got != tt.want {
+				t.Fatalf("IsRequestGlobalClientError()=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyHTTPResponse413(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -1275,6 +1330,22 @@ func TestShouldFallbackProtocol(t *testing.T) {
 			statusCode: http.StatusBadRequest,
 			body:       `{"error":{"message":"input is required","type":"invalid_request_error","code":"invalid_request_error"}}`,
 			want:       true,
+		},
+		{
+			name:       "context length 400 is request-global",
+			statusCode: http.StatusBadRequest,
+			body:       `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`,
+		},
+		{
+			name:       "empty text 400 may still probe another protocol",
+			statusCode: http.StatusBadRequest,
+			body:       `{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`,
+			want:       true,
+		},
+		{
+			name:       "request too large is not a protocol miss",
+			statusCode: http.StatusRequestEntityTooLarge,
+			body:       `{"code":"RequestTooLarge","message":"Request body size exceeds maximum allowed size"}`,
 		},
 		{
 			name:       "ordinary anthropic beta validation error",

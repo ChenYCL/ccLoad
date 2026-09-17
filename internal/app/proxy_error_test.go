@@ -20,6 +20,7 @@ func Test_HandleProxyError_Basic(t *testing.T) {
 		name           string
 		err            error
 		statusCode     int
+		errorBody      []byte
 		expectedAction cooldown.Action
 	}{
 		{
@@ -36,6 +37,30 @@ func Test_HandleProxyError_Basic(t *testing.T) {
 			name:           "401 unauthorized - Key级",
 			statusCode:     401,
 			expectedAction: cooldown.ActionRetryKey,
+		},
+		{
+			name:           "403 permission continues",
+			statusCode:     403,
+			errorBody:      []byte(`{"error":{"type":"permission_error","message":"request illegal"}}`),
+			expectedAction: cooldown.ActionRetryKey,
+		},
+		{
+			name:           "413 request too large continues",
+			statusCode:     413,
+			errorBody:      []byte(`{"code":"RequestTooLarge","message":"Request body size exceeds maximum allowed size"}`),
+			expectedAction: cooldown.ActionRetryModel,
+		},
+		{
+			name:           "400 empty text continues",
+			statusCode:     400,
+			errorBody:      []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`),
+			expectedAction: cooldown.ActionRetryModel,
+		},
+		{
+			name:           "400 context length stops",
+			statusCode:     400,
+			errorBody:      []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`),
+			expectedAction: cooldown.ActionReturnClient,
 		},
 		{
 			name:           "500 server error",
@@ -66,9 +91,13 @@ func Test_HandleProxyError_Basic(t *testing.T) {
 			var err error
 
 			if tt.statusCode > 0 {
+				body := tt.errorBody
+				if len(body) == 0 {
+					body = []byte(`{"error": "test"}`)
+				}
 				res = &fwResult{
 					Status: tt.statusCode,
-					Body:   []byte(`{"error": "test"}`),
+					Body:   body,
 					Header: make(http.Header),
 				}
 			} else {

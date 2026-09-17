@@ -1186,6 +1186,9 @@ func isModelUnavailableResponse(responseBody []byte) bool {
 // Cloudflare block page is also safe to replay through another protocol because
 // the request was rejected before model execution.
 func ShouldFallbackProtocol(statusCode int, responseBody []byte) bool {
+	if IsRequestGlobalClientError(statusCode, responseBody) {
+		return false
+	}
 	switch statusCode {
 	case http.StatusBadRequest:
 		return true
