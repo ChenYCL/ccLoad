@@ -618,10 +618,11 @@ func shouldStopTryingChannels(result *proxyResult) bool {
 	if result == nil {
 		return true
 	}
-	// 客户端取消：立即停止
 	if result.isClientCanceled {
 		return true
 	}
+	// ActionReturnClient is reserved for request-global rejections
+	// (util.IsRequestGlobalClientError). Provider-local 400/403/413 continue.
 	return result.nextAction == cooldown.ActionReturnClient
 }
 

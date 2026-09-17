@@ -208,6 +208,38 @@ func (r *sseErrorResponse) ErrorType() string {
 	return r.Error.Code
 }
 
+// IsRequestGlobalClientError reports a rejection that cannot succeed on any
+// remaining matching-model channel, so the proxy must return it to the client.
+//
+// Default for 400/403/413 is the opposite: keep walking valid channels. Empty
+// text, per-model max_tokens, and gateway RequestTooLarge are provider-local.
+// Request-global 400/413: context-window overflow of this serialized body, or a
+// WebSocket close 1009 bridged as 413 message_too_big (transport already dead).
+func IsRequestGlobalClientError(statusCode int, responseBody []byte) bool {
+	switch statusCode {
+	case http.StatusBadRequest, StatusSSEError:
+		return IsContextLengthExceededError(responseBody)
+	case http.StatusRequestEntityTooLarge:
+		return IsContextLengthExceededError(responseBody) || isWebsocketMessageTooBigError(responseBody)
+	default:
+		return false
+	}
+}
+
+func isWebsocketMessageTooBigError(responseBody []byte) bool {
+	var payload sseErrorResponse
+	if json.Unmarshal(responseBody, &payload) != nil {
+		return false
+	}
+	return strings.TrimSpace(payload.Error.Code) == "message_too_big"
+}
+
+// isProviderConstrainedRequestStatus is a 400/413 this upstream/model refused.
+// Another channel that still serves the same model may accept the same request.
+func isProviderConstrainedRequestStatus(statusCode int) bool {
+	return statusCode == http.StatusBadRequest || statusCode == http.StatusRequestEntityTooLarge
+}
+
 // IsContextLengthExceededError reports whether an upstream error says that the
 // current request exceeds the model context window. Codex can emit the error as
 // error, response.error, or a top-level streaming error object.
@@ -365,9 +397,8 @@ func ClassifyHTTPStatus(statusCode int) ErrorLevel {
 //
 // 分类策略：
 //   - 401/403 做语义分析：默认 Key 级，只在明确账户级不可逆错误时升级为 Channel 级
-//   - 400/413 固定按模型级处理，避免一个模型的请求约束误伤整个渠道；
-//     413 不能当客户端直返：同一份 Claude Code 历史在 Anthropic 能过、在别的网关会 RequestTooLarge，
-//     直返会打断已经开始的渠道 failover
+//   - 400/403/413 默认继续走后续匹配模型的有效渠道（只冷却当前渠道上的该模型）。
+//     仅 IsRequestGlobalClientError（这份序列化请求换哪家都会失败，目前是上下文超长）才直返客户端
 //   - 429 做限流范围分析：默认 Key 级，只有明确长时间/全局限流特征才升级为 Channel 级
 //   - 1308 错误优先：无论 HTTP 状态码，检测到就按 Key 级处理（用于精确冷却时间）
 //   - 其他状态码：走表驱动分类（statusCodeMetaMap）
@@ -442,10 +473,7 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 		}
 	}
 
-	// 上下文超限由当前请求体决定，切换 Key、模型或渠道都不会改变结果。
-	// SSE 路径使用 597 承载 HTTP 200 中的错误事件；普通 Codex 错误使用 400/413。
-	if (statusCode == StatusSSEError || statusCode == http.StatusBadRequest || statusCode == http.StatusRequestEntityTooLarge) &&
-		IsContextLengthExceededError(responseBody) {
+	if IsRequestGlobalClientError(statusCode, responseBody) {
 		return HTTPResponseClassification{Level: ErrorLevelClient}
 	}
 
@@ -486,18 +514,7 @@ func classifyHTTPResponseWithMetaAt(statusCode int, headers map[string][]string,
 		return classification
 	}
 
-	// WebSocket close 1009 被桥接为 413，必须保留关闭语义，不能按普通 HTTP 413 换渠。
-	if statusCode == http.StatusRequestEntityTooLarge {
-		var payload sseErrorResponse
-		if json.Unmarshal(responseBody, &payload) == nil && strings.TrimSpace(payload.Error.Code) == "message_too_big" {
-			return HTTPResponseClassification{Level: ErrorLevelClient}
-		}
-	}
-
-	// 400/413 表示当前模型/上游无法接受该请求。切换渠道，但只冷却实际请求的模型。
-	// 413 必须与 400 同级：否则 auto 协议探测把 Anthropic 400 交给下一个候选后，
-	// 候选网关的 RequestTooLarge 会 ActionReturnClient，客户端直接中断、后面的匹配渠道进不去。
-	if statusCode == 400 || statusCode == http.StatusRequestEntityTooLarge {
+	if isProviderConstrainedRequestStatus(statusCode) {
 		return HTTPResponseClassification{
 			Level:       ErrorLevelKey,
 			ModelScoped: true,

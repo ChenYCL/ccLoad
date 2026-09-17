@@ -1114,7 +1114,16 @@ func TestClassifyHTTPResponse413(t *testing.T) {
 			if classification.Level != wantLevel || classification.ModelScoped != !tt.clientError {
 				t.Fatalf("classification=%+v, want level=%v modelScoped=%v", classification, wantLevel, !tt.clientError)
 			}
+			if got := IsRequestGlobalClientError(http.StatusRequestEntityTooLarge, []byte(tt.body)); got != tt.clientError {
+				t.Fatalf("IsRequestGlobalClientError(%s)=%v, want %v", tt.name, got, tt.clientError)
+			}
 		})
+	}
+	if IsRequestGlobalClientError(http.StatusForbidden, []byte(`{"error":{"type":"permission_error"}}`)) {
+		t.Fatal("403 is provider-local and must not stop channel failover")
+	}
+	if IsRequestGlobalClientError(http.StatusBadRequest, []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`)) {
+		t.Fatal("Anthropic empty-text 400 is provider-local")
 	}
 }
 
@@ -1142,6 +1151,9 @@ func TestClassifyHTTPResponseContextLengthExceededIsClientError(t *testing.T) {
 			classification := ClassifyHTTPResponseWithMeta(http.StatusBadRequest, nil, tt.body)
 			if classification.Level != ErrorLevelClient || classification.ModelScoped {
 				t.Fatalf("classification=%+v, want client-level without model scope", classification)
+			}
+			if !IsRequestGlobalClientError(http.StatusBadRequest, tt.body) {
+				t.Fatal("context-length 400 must be request-global")
 			}
 		})
 	}
