@@ -1122,16 +1122,14 @@ func TestIsRequestGlobalClientError(t *testing.T) {
 			body:   `{"code":"RequestTooLarge","message":"Request body size exceeds maximum allowed size"}`,
 		},
 		{
-			name:   "context length 400 is request-global",
+			name:   "context length 400 is provider-local",
 			status: http.StatusBadRequest,
 			body:   `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`,
-			want:   true,
 		},
 		{
-			name:   "websocket 413 message_too_big is request-global",
+			name:   "websocket 413 message_too_big is provider-local while uncommitted",
 			status: http.StatusRequestEntityTooLarge,
 			body:   `{"type":"error","status":413,"error":{"type":"invalid_request_error","code":"message_too_big","message":"upstream websocket message too big"}}`,
-			want:   true,
 		},
 		{
 			name:   "message_too_big only in text is still provider-local",
@@ -1156,8 +1154,8 @@ func TestClassifyHTTPResponse413(t *testing.T) {
 		clientError bool
 	}{
 		{"request_too_large", `{"code":"RequestTooLarge","message":"Request body size exceeds maximum allowed size"}`, false},
-		{"websocket_close_1009", `{"type":"error","status":413,"error":{"type":"invalid_request_error","code":"message_too_big","message":"upstream websocket message too big"}}`, true},
-		{"context_length", `{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`, true},
+		{"websocket_close_1009", `{"type":"error","status":413,"error":{"type":"invalid_request_error","code":"message_too_big","message":"upstream websocket message too big"}}`, false},
+		{"context_length", `{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`, false},
 		{"message_is_not_error_code", `{"error":{"code":"RequestTooLarge","message":"message_too_big"}}`, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1182,7 +1180,7 @@ func TestClassifyHTTPResponse413(t *testing.T) {
 	}
 }
 
-func TestClassifyHTTPResponseContextLengthExceededIsClientError(t *testing.T) {
+func TestClassifyHTTPResponseContextLengthExceededKeepsWalkingChannels(t *testing.T) {
 	tests := []struct {
 		name string
 		body []byte
@@ -1204,11 +1202,11 @@ func TestClassifyHTTPResponseContextLengthExceededIsClientError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			classification := ClassifyHTTPResponseWithMeta(http.StatusBadRequest, nil, tt.body)
-			if classification.Level != ErrorLevelClient || classification.ModelScoped {
-				t.Fatalf("classification=%+v, want client-level without model scope", classification)
+			if classification.Level != ErrorLevelKey || !classification.ModelScoped {
+				t.Fatalf("classification=%+v, want model-scoped Key so failover continues", classification)
 			}
-			if !IsRequestGlobalClientError(http.StatusBadRequest, tt.body) {
-				t.Fatal("context-length 400 must be request-global")
+			if IsRequestGlobalClientError(http.StatusBadRequest, tt.body) {
+				t.Fatal("context-length 400 must keep walking matching-model channels")
 			}
 		})
 	}
@@ -1332,9 +1330,10 @@ func TestShouldFallbackProtocol(t *testing.T) {
 			want:       true,
 		},
 		{
-			name:       "context length 400 is request-global",
+			name:       "context length 400 may still probe another protocol",
 			statusCode: http.StatusBadRequest,
 			body:       `{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`,
+			want:       true,
 		},
 		{
 			name:       "empty text 400 may still probe another protocol",

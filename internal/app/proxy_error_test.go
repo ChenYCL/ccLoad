@@ -57,10 +57,10 @@ func Test_HandleProxyError_Basic(t *testing.T) {
 			expectedAction: cooldown.ActionRetryModel,
 		},
 		{
-			name:           "400 context length stops",
+			name:           "400 context length continues",
 			statusCode:     400,
 			errorBody:      []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`),
-			expectedAction: cooldown.ActionReturnClient,
+			expectedAction: cooldown.ActionRetryModel,
 		},
 		{
 			name:           "500 server error",

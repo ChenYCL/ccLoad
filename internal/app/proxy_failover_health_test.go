@@ -85,7 +85,7 @@ func TestProxy_ProviderLocalFailuresFailoverToMatchingModel(t *testing.T) {
 	}
 }
 
-func TestProxy_ContextLengthDoesNotFailover(t *testing.T) {
+func TestProxy_ContextLengthFailoversToMatchingModel(t *testing.T) {
 	t.Parallel()
 	var backupHits atomic.Int64
 	primary := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -96,18 +96,18 @@ func TestProxy_ContextLengthDoesNotFailover(t *testing.T) {
 	defer primary.Close()
 	backup := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		backupHits.Add(1)
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"chat-1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
 	}))
 	defer backup.Close()
 
 	env := setupProxyTestEnv(t, []testChannel{
-		{name: "ctx-primary", models: "gpt-ctx-stop", apiKey: "sk-1", priority: 100},
-		{name: "ctx-backup", models: "gpt-ctx-stop", apiKey: "sk-2", priority: 50},
+		{name: "ctx-primary", models: "gpt-ctx-continue", apiKey: "sk-1", priority: 100},
+		{name: "ctx-backup", models: "gpt-ctx-continue", apiKey: "sk-2", priority: 50},
 	}, map[int]string{0: primary.URL, 1: backup.URL})
 
 	body, _ := json.Marshal(map[string]any{
-		"model":    "gpt-ctx-stop",
+		"model":    "gpt-ctx-continue",
 		"messages": []map[string]string{{"role": "user", "content": "hi"}},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
@@ -116,10 +116,10 @@ func TestProxy_ContextLengthDoesNotFailover(t *testing.T) {
 	w := httptest.NewRecorder()
 	env.engine.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d, want 400 request-global; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 after context-length failover; body=%s", w.Code, w.Body.String())
 	}
-	if backupHits.Load() != 0 {
-		t.Fatalf("backup hits=%d, want 0 for context-length", backupHits.Load())
+	if backupHits.Load() != 1 {
+		t.Fatalf("backup hits=%d, want 1", backupHits.Load())
 	}
 }

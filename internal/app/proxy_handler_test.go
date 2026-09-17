@@ -351,7 +351,7 @@ func TestShouldStopTryingChannels(t *testing.T) {
 		{"403 oauth remapped to RetryChannel => continue", &proxyResult{status: 403, nextAction: cooldown.ActionRetryChannel}, false},
 		{"413 RequestTooLarge RetryModel => continue", &proxyResult{status: 413, nextAction: cooldown.ActionRetryModel}, false},
 		{"400 empty-text RetryModel => continue", &proxyResult{status: 400, nextAction: cooldown.ActionRetryModel}, false},
-		{"context-length ReturnClient => stop", &proxyResult{status: 400, nextAction: cooldown.ActionReturnClient}, true},
+		{"context-length RetryModel => continue", &proxyResult{status: 400, nextAction: cooldown.ActionRetryModel}, false},
 	}
 
 	for _, tt := range tests {

@@ -554,12 +554,12 @@ func TestHandleError_HTTP403RetriesKeyNotClient(t *testing.T) {
 	}
 }
 
-func TestHandleError_ContextLength400ReturnsClient(t *testing.T) {
+func TestHandleError_ContextLength400RetriesModel(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	manager := NewManager(store, nil)
 	ctx := context.Background()
-	cfg := createTestChannel(t, store, "test-context-length-stop")
+	cfg := createTestChannel(t, store, "test-context-length-continue")
 
 	action := manager.HandleError(ctx, ErrorInput{
 		ChannelID:  cfg.ID,
@@ -568,15 +568,8 @@ func TestHandleError_ContextLength400ReturnsClient(t *testing.T) {
 		StatusCode: 400,
 		ErrorBody:  []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}`),
 	})
-	if action != ActionReturnClient {
-		t.Fatalf("action=%v, want ActionReturnClient for request-global context length", action)
-	}
-	channelCfg, err := store.GetConfig(ctx, cfg.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if channelCfg.IsCoolingDown(time.Now()) {
-		t.Fatal("request-global 400 must not cool the channel")
+	if action != ActionRetryModel {
+		t.Fatalf("action=%v, want ActionRetryModel so another channel can accept a larger window", action)
 	}
 }
 

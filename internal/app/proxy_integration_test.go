@@ -12607,7 +12607,7 @@ func TestProxy_ResponsesHTTPMissingStoredItemRetriesOnce(t *testing.T) {
 	}
 }
 
-func TestProxy_SSEContextLengthExceededReturns400WithoutRetryOrCooldown(t *testing.T) {
+func TestProxy_SSEContextLengthExceededFailoversToMatchingModel(t *testing.T) {
 	var firstCalls atomic.Int32
 	upstream1 := newTestHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstCalls.Add(1)
@@ -12628,7 +12628,7 @@ func TestProxy_SSEContextLengthExceededReturns400WithoutRetryOrCooldown(t *testi
 
 	env := setupProxyTestEnv(t, []testChannel{
 		{name: "context-too-large", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-1", priority: 100},
-		{name: "must-not-run", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-2", priority: 50},
+		{name: "larger-window", upstreamProtocol: "codex", models: "gpt-test", apiKey: "sk-2", priority: 50},
 	}, map[int]string{0: upstream1.URL, 1: upstream2.URL})
 
 	w := doProxyRequest(t, env.engine, "/v1/responses", map[string]any{
@@ -12637,37 +12637,11 @@ func TestProxy_SSEContextLengthExceededReturns400WithoutRetryOrCooldown(t *testi
 		"input":  "long conversation",
 	}, nil)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d, want 400; body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 after context-length failover; body=%s", w.Code, w.Body.String())
 	}
-	if got := gjson.GetBytes(w.Body.Bytes(), "error.code").String(); got != "context_length_exceeded" {
-		t.Fatalf("error.code=%q, want context_length_exceeded; body=%s", got, w.Body.String())
-	}
-	if firstCalls.Load() != 1 || secondCalls.Load() != 0 {
-		t.Fatalf("upstream calls first=%d second=%d, want 1/0", firstCalls.Load(), secondCalls.Load())
-	}
-
-	ctx := context.Background()
-	keyCooldowns, err := env.store.GetAllKeyCooldowns(ctx)
-	if err != nil {
-		t.Fatalf("GetAllKeyCooldowns: %v", err)
-	}
-	if len(keyCooldowns) != 0 {
-		t.Fatalf("key cooldowns=%v, want none", keyCooldowns)
-	}
-	modelCooldowns, err := env.store.GetAllModelCooldowns(ctx)
-	if err != nil {
-		t.Fatalf("GetAllModelCooldowns: %v", err)
-	}
-	if len(modelCooldowns) != 0 {
-		t.Fatalf("model cooldowns=%v, want none", modelCooldowns)
-	}
-	channelCooldowns, err := env.store.GetAllChannelCooldowns(ctx)
-	if err != nil {
-		t.Fatalf("GetAllChannelCooldowns: %v", err)
-	}
-	if len(channelCooldowns) != 0 {
-		t.Fatalf("channel cooldowns=%v, want none", channelCooldowns)
+	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+		t.Fatalf("upstream calls first=%d second=%d, want 1/1", firstCalls.Load(), secondCalls.Load())
 	}
 }
 

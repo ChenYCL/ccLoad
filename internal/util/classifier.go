@@ -211,27 +211,13 @@ func (r *sseErrorResponse) ErrorType() string {
 // IsRequestGlobalClientError reports a rejection that cannot succeed on any
 // remaining matching-model channel, so the proxy must return it to the client.
 //
-// Default for 400/403/413 is the opposite: keep walking valid channels. Empty
-// text, per-model max_tokens, and gateway RequestTooLarge are provider-local.
-// Request-global 400/413: context-window overflow of this serialized body, or a
-// WebSocket close 1009 bridged as 413 message_too_big (transport already dead).
-func IsRequestGlobalClientError(statusCode int, responseBody []byte) bool {
-	switch statusCode {
-	case http.StatusBadRequest, StatusSSEError:
-		return IsContextLengthExceededError(responseBody)
-	case http.StatusRequestEntityTooLarge:
-		return IsContextLengthExceededError(responseBody) || isWebsocketMessageTooBigError(responseBody)
-	default:
-		return false
-	}
-}
-
-func isWebsocketMessageTooBigError(responseBody []byte) bool {
-	var payload sseErrorResponse
-	if json.Unmarshal(responseBody, &payload) != nil {
-		return false
-	}
-	return strings.TrimSpace(payload.Error.Code) == "message_too_big"
+// Default for 400/403/413 is keep walking valid channels: empty text, per-model
+// max_tokens, gateway RequestTooLarge, context-window limits, and bridged
+// WebSocket 1009 are all provider- or transport-local. Another channel may
+// still accept the same request. A committed downstream stream cannot rotate
+// (HTTP already flushed); that is enforced by ResponseCommitted, not here.
+func IsRequestGlobalClientError(_ int, _ []byte) bool {
+	return false
 }
 
 // isProviderConstrainedRequestStatus is a 400/413 this upstream/model refused.
@@ -397,8 +383,8 @@ func ClassifyHTTPStatus(statusCode int) ErrorLevel {
 //
 // 分类策略：
 //   - 401/403 做语义分析：默认 Key 级，只在明确账户级不可逆错误时升级为 Channel 级
-//   - 400/403/413 默认继续走后续匹配模型的有效渠道（只冷却当前渠道上的该模型）。
-//     仅 IsRequestGlobalClientError（这份序列化请求换哪家都会失败，目前是上下文超长）才直返客户端
+//   - 400/403/413 默认继续走后续匹配模型的有效渠道（只冷却当前渠道上的该模型），
+//     含空 text、max_tokens、RequestTooLarge、上下文超长、WS 1009。已提交给下游的流无法换渠。
 //   - 429 做限流范围分析：默认 Key 级，只有明确长时间/全局限流特征才升级为 Channel 级
 //   - 1308 错误优先：无论 HTTP 状态码，检测到就按 Key 级处理（用于精确冷却时间）
 //   - 其他状态码：走表驱动分类（statusCodeMetaMap）
