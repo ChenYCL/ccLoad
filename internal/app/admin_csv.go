@@ -21,6 +21,7 @@ import (
 	"ccLoad/internal/codexauth"
 	"ccLoad/internal/cooldown"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/util"
 	"ccLoad/internal/xaiauth"
@@ -975,6 +976,12 @@ func normalizeCSVImportOAuthCredential(authType, raw string) (string, error) {
 			return "", err
 		}
 		return credential.JSON()
+	case model.AuthTypeGitHubCopilotOAuth:
+		credential, err := githubcopilotauth.ParseCredential([]byte(raw))
+		if err != nil {
+			return "", err
+		}
+		return credential.JSON()
 	case model.AuthTypeCodexOAuth:
 		credential, err := codexauth.ParseCredential([]byte(raw))
 		if err != nil {
@@ -1098,6 +1105,19 @@ func (s *Server) validateCSVImportOAuthCredential(
 			}
 		} else if credential.AccessToken != current.AccessToken {
 			return "", errors.New("cannot validate replacement CodeBuddy token without refresh_token")
+		}
+		return credential.JSON()
+	case model.AuthTypeGitHubCopilotOAuth:
+		credential, err := githubcopilotauth.ParseCredential([]byte(imported.OAuthCredential))
+		if err != nil {
+			return "", err
+		}
+		current, err := githubcopilotauth.ParseCredential([]byte(existing.OAuthCredential))
+		if err != nil {
+			return "", err
+		}
+		if current.IdentityLogin() != "" && credential.IdentityLogin() != current.IdentityLogin() {
+			return "", errors.New("GitHub Copilot imported account does not match existing channel")
 		}
 		return credential.JSON()
 	case model.AuthTypeCodexOAuth:

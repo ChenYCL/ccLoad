@@ -1363,7 +1363,7 @@ func TestAnthropicRetryBodyFor400PreservesOrderWhileDowngradingThinking(t *testi
 		Body:   []byte(`{"error":{"type":"invalid_request_error","message":"thinking blocks are not supported"}}`),
 	}
 
-	got, strategy, ok := anthropicRetryBodyFor400(protocol.Anthropic, protocol.TransformPlan{TranslatedBody: body}, res)
+	got, strategy, ok := anthropicRetryBodyFor400(protocol.Anthropic, nil, protocol.TransformPlan{TranslatedBody: body}, res)
 	if !ok || strategy != "downgrade_anthropic_thinking" {
 		t.Fatalf("retry = (%q, %v), body=%s", strategy, ok, got)
 	}
@@ -2362,7 +2362,7 @@ func TestAnthropicOAuthFinalizerReplacesForgedBillingPrefix(t *testing.T) {
 		t.Fatalf("finalizeAnthropicClaudeCodeMessagesBody(, anthropicOfficialTestURL) error = %v", err)
 	}
 	if got := gjson.GetBytes(body, "system.0.text").String(); got == "x-anthropic-billing-header: attacker-controlled" ||
-		!strings.Contains(got, "cc_version=2.1.258.") {
+		!strings.Contains(got, "cc_version="+anthropicCLIVersion+".") {
 		t.Fatalf("forged billing block survived: %q", got)
 	}
 	if got := gjson.GetBytes(body, "messages.0.content").String(); got != "[System Instructions]\nx-anthropic-billing-header: attacker-controlled" {
@@ -2420,7 +2420,7 @@ func TestAnthropicOAuthPreservesNativeClaudeCodeBody(t *testing.T) {
 		"messages":[{"role":"user","content":"hello"}],"max_tokens":1024
 	}`, parsedCredential.DeviceID)
 	nativeHeaders := http.Header{
-		"User-Agent": {"claude-cli/2.1.220 (external, cli)"},
+		"User-Agent": {"claude-cli/" + anthropicCLIVersion + " (external, cli)"},
 		"X-App":      {"cli"}, "Anthropic-Beta": {"claude-code-20250219"},
 		"X-Claude-Code-Session-Id": {"e03895ad-8b34-4a84-bbf6-002e8909b17b"},
 	}
@@ -2460,7 +2460,7 @@ func TestAnthropicOAuthPreservesMarkerlessHaikuHelper(t *testing.T) {
 		"User-Agent": {"claude-cli/2.1.220 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {betas},
 		"Anthropic-Version": {"2023-06-01"}, "Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 		"X-Claude-Code-Session-Id": {sessionID}, "X-Client-Request-Id": {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
-		"X-Stainless-Lang": {"js"}, "X-Stainless-Runtime": {"node"}, "X-Stainless-Package-Version": {"0.94.0"},
+		"X-Stainless-Lang": {"js"}, "X-Stainless-Runtime": {"node"}, "X-Stainless-Package-Version": {anthropicStainlessPackageVersion},
 		"X-Stainless-Runtime-Version": {"v26.3.0"}, "X-Stainless-OS": {"MacOS"}, "X-Stainless-Arch": {"arm64"},
 		"X-Stainless-Retry-Count": {"0"}, "X-Stainless-Timeout": {"600"},
 	}
@@ -2533,7 +2533,7 @@ func TestAnthropicOAuthPreservesStructuredHaikuHelper(t *testing.T) {
 		"Anthropic-Version": {"2023-06-01"}, "Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 		"X-Claude-Code-Session-Id": {sessionID}, "X-Client-Request-Id": {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
 		"X-Stainless-Async": {"async"}, "X-Stainless-Lang": {"js"}, "X-Stainless-Runtime": {"node"},
-		"X-Stainless-Package-Version": {"0.94.0"}, "X-Stainless-Runtime-Version": {"v26.3.0"},
+		"X-Stainless-Package-Version": {anthropicStainlessPackageVersion}, "X-Stainless-Runtime-Version": {anthropicStainlessRuntimeVersion},
 		"X-Stainless-OS": {"MacOS"}, "X-Stainless-Arch": {"arm64"}, "X-Stainless-Retry-Count": {"0"}, "X-Stainless-Timeout": {"600"},
 	}
 	finalized, err := finalizeAnthropicClaudeCodeMessagesBody(
@@ -2641,7 +2641,7 @@ func TestAnthropicOAuthRejectsForgedNativeFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(body, "system.0.text").String(); strings.Contains(got, "forged") || !strings.Contains(got, "cc_version=2.1.258.") {
+	if got := gjson.GetBytes(body, "system.0.text").String(); strings.Contains(got, "forged") || !strings.Contains(got, "cc_version="+anthropicCLIVersion+".") {
 		t.Fatalf("forged native fingerprint bypassed cloaking: %q", got)
 	}
 	identity := gjson.GetBytes(body, "metadata.user_id").String()
@@ -2860,9 +2860,19 @@ func TestAnthropicAPIKeyFingerprintMatchesOAuthWireExceptCCH(t *testing.T) {
 	if got := gjson.GetBytes(thirdPartyBody, "system.0.text").String(); strings.Contains(got, "cch=") {
 		t.Fatalf("API-key billing on a third-party gateway must stay unsigned: %q", got)
 	}
-	if anthropicClaudeCodeBetas(oauthBody) != anthropicClaudeCodeBetas(apiKeyBody) {
-		t.Fatalf("beta sets diverged: OAuth=%q API key=%q",
-			anthropicClaudeCodeBetas(oauthBody), anthropicClaudeCodeBetas(apiKeyBody))
+	oauthBetas := anthropicClaudeCodeBetas(oauthBody, true)
+	apiKeyBetas := anthropicClaudeCodeBetas(apiKeyBody, false)
+	if !strings.Contains(oauthBetas, "thinking-binding-controls-2026-08-01") {
+		t.Fatalf("OAuth betas missing thinking-binding: %q", oauthBetas)
+	}
+	if strings.Contains(apiKeyBetas, "thinking-binding-controls-2026-08-01") {
+		t.Fatalf("API key betas unexpectedly include thinking-binding: %q", apiKeyBetas)
+	}
+	if !strings.Contains(oauthBetas, "extended-cache-ttl-2025-04-11") {
+		t.Fatalf("OAuth betas missing extended-cache-ttl: %q", oauthBetas)
+	}
+	if strings.Contains(apiKeyBetas, "extended-cache-ttl-2025-04-11") {
+		t.Fatalf("API key betas declared extended-cache-ttl without body TTL: %q", apiKeyBetas)
 	}
 
 	oauthRequest, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(oauthBody)))
@@ -2885,13 +2895,24 @@ func TestAnthropicAPIKeyFingerprintMatchesOAuthWireExceptCCH(t *testing.T) {
 		t.Fatalf("OAuth auth headers = %v", oauthRequest.Header)
 	}
 	// 认证头之外的指纹头必须逐项相同；session/request id 随请求变化，只校验非空。
-	for _, name := range []string{"User-Agent", "anthropic-version", "anthropic-beta", "x-app",
+	// anthropic-beta 按官方抓包在 OAuth / API Key 上分流（binding、cache ttl），单独校验。
+	for _, name := range []string{"User-Agent", "anthropic-version", "x-app",
 		"Accept-Encoding", "X-Stainless-Runtime-Version", "X-Stainless-Package-Version", "X-Stainless-Timeout"} {
 		oauthValue := headerValueFold(oauthRequest.Header, name)
 		apiKeyValue := headerValueFold(apiKeyRequest.Header, name)
 		if oauthValue == "" || oauthValue != apiKeyValue {
 			t.Fatalf("%s: OAuth=%q API key=%q", name, oauthValue, apiKeyValue)
 		}
+	}
+	oauthBeta := headerValueFold(oauthRequest.Header, "anthropic-beta")
+	apiKeyBeta := headerValueFold(apiKeyRequest.Header, "anthropic-beta")
+	if !strings.Contains(oauthBeta, "thinking-binding-controls-2026-08-01") ||
+		!strings.Contains(oauthBeta, "extended-cache-ttl-2025-04-11") {
+		t.Fatalf("OAuth anthropic-beta incomplete: %q", oauthBeta)
+	}
+	if strings.Contains(apiKeyBeta, "thinking-binding-controls-2026-08-01") ||
+		strings.Contains(apiKeyBeta, "extended-cache-ttl-2025-04-11") {
+		t.Fatalf("API key anthropic-beta unexpectedly includes OAuth-only tokens: %q", apiKeyBeta)
 	}
 	for _, name := range []string{"X-Claude-Code-Session-Id", "x-client-request-id"} {
 		if headerValueFold(apiKeyRequest.Header, name) == "" {
@@ -2916,7 +2937,7 @@ func TestAnthropicClaudeCodeCacheTTLFollowsCaller(t *testing.T) {
 	if hits := gjson.GetBytes(defaultBody, `@dig:ttl`).Array(); len(hits) != 0 {
 		t.Fatalf("gateway injected a cache TTL the caller did not ask for: %s", defaultBody)
 	}
-	if betas := anthropicClaudeCodeBetas(defaultBody); strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
+	if betas := anthropicClaudeCodeBetas(defaultBody, false); strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("extended-cache-ttl beta declared without any cache TTL in body: %q", betas)
 	}
 
@@ -2942,7 +2963,7 @@ func TestAnthropicClaudeCodeCacheTTLFollowsCaller(t *testing.T) {
 	if got := gjson.GetBytes(longBody, "system.2.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("gateway system breakpoint ttl=%q, want 1h: %s", got, longBody)
 	}
-	if betas := anthropicClaudeCodeBetas(longBody); !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
+	if betas := anthropicClaudeCodeBetas(longBody, false); !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("1h cache TTL without extended-cache-ttl beta: %q", betas)
 	}
 }
@@ -3239,6 +3260,32 @@ func TestValidAnthropicClaudeCLIUserAgent(t *testing.T) {
 					testCase.userAgent, got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestAnthropicClientVersionFloorsOldCLI(t *testing.T) {
+	t.Parallel()
+	old := http.Header{"User-Agent": {"claude-cli/2.1.209 (external, cli)"}}
+	if got := anthropicClientVersion(old); got != anthropicCLIVersion {
+		t.Fatalf("old client version=%q, want pin %q", got, anthropicCLIVersion)
+	}
+	newer := "2.1.999"
+	fresh := http.Header{"User-Agent": {"claude-cli/" + newer + " (external, cli)"}}
+	if got := anthropicClientVersion(fresh); got != newer {
+		t.Fatalf("newer client version=%q, want %q", got, newer)
+	}
+	nativeOK := http.Header{
+		"User-Agent":     {"claude-cli/" + anthropicCLIVersion + " (external, cli)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219"},
+	}
+	if !isNativeAnthropicClaudeCodeRequest(nativeOK) {
+		t.Fatal("current pin must still be native")
+	}
+	nativeOld := nativeOK.Clone()
+	nativeOld.Set("User-Agent", "claude-cli/2.1.209 (external, cli)")
+	if isNativeAnthropicClaudeCodeRequest(nativeOld) {
+		t.Fatal("CLI older than the pin must not passthrough")
 	}
 }
 

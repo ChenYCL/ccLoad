@@ -29,6 +29,7 @@ import (
 	"ccLoad/internal/config"
 	"ccLoad/internal/cooldown"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
 	protocolbuiltin "ccLoad/internal/protocol/builtin"
@@ -113,6 +114,9 @@ type Server struct {
 	cursorRunnerMu                sync.RWMutex
 	cursorRunner                  cursorauth.Runner
 	cursorBridgeRequired          atomic.Bool
+	githubCopilotService          *githubcopilotauth.Service
+	githubCopilotCredentials      *githubCopilotCredentialManager
+	githubCopilotOAuth            *githubCopilotOAuthManager
 	cursorBridgeStartOnce         sync.Once
 	ensureCursorBridge            func(context.Context) (string, error)
 	startCursorBridge             func(context.Context, string) (cursorauth.Runner, error)
@@ -405,6 +409,22 @@ func newServer(store storage.Store, logBatchTimeout time.Duration) *Server {
 		s.zedCredentials.invalidate(channelID)
 		s.InvalidateChannelListCache()
 	})
+	s.githubCopilotService = githubcopilotauth.NewService(s.client)
+	s.githubCopilotCredentials = newGitHubCopilotCredentialManager(store, s.getClientForChannel, func(int64) {
+		s.InvalidateChannelListCache()
+	})
+	s.githubCopilotCredentials.refreshTracker = s.oauthCredentialRefreshes
+	s.githubCopilotOAuth = newGitHubCopilotOAuthManager(
+		s.baseCtx,
+		s.githubCopilotService,
+		func(ctx context.Context, credential *githubcopilotauth.Credential) (int64, string, error) {
+			cfg, _, err := s.commitGitHubCopilotCredential(ctx, credential)
+			if err != nil {
+				return 0, "", err
+			}
+			return cfg.ID, cfg.Name, nil
+		},
+	)
 	s.cursorService = cursorauth.NewService(s.client)
 	s.cursorCredentials = newCursorCredentialManager(store, s.getClientForChannel, func(int64) {
 		s.InvalidateChannelListCache()
@@ -983,6 +1003,8 @@ func (s *Server) startBackgroundWorkers() {
 
 	s.wg.Add(1)
 	go s.responsesExecutionSessionCleanupLoop()
+	s.wg.Add(1)
+	go s.protocolCapabilityCleanupLoop()
 	s.wg.Add(1)
 	go s.managementCheckinLoop()
 }
@@ -1646,6 +1668,10 @@ func (s *Server) SetupRoutes(r *gin.Engine) {
 		admin.POST("/zai/oauth/cancel", s.HandleCancelZAIOAuth)
 		admin.POST("/zai/credentials/import", s.HandleImportZAICredential)
 		admin.POST("/channels/:id/zai-credential/refresh", s.HandleRefreshZAICredential)
+		admin.POST("/github-copilot/oauth/start", s.HandleStartGitHubCopilotOAuth)
+		admin.GET("/github-copilot/oauth/status", s.HandleGitHubCopilotOAuthStatus)
+		admin.POST("/github-copilot/oauth/cancel", s.HandleCancelGitHubCopilotOAuth)
+		admin.POST("/channels/:id/github-copilot-credential/refresh", s.HandleRefreshGitHubCopilotCredential)
 		admin.POST("/zed/oauth/start", s.HandleStartZedOAuth)
 		admin.GET("/zed/oauth/status", s.HandleZedOAuthStatus)
 		admin.POST("/zed/oauth/cancel", s.HandleCancelZedOAuth)
@@ -1909,6 +1935,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.zaiOAuth != nil {
 		s.zaiOAuth.close()
+	}
+	if s.githubCopilotOAuth != nil {
+		s.githubCopilotOAuth.close()
 	}
 	if s.codeBuddyOAuth != nil {
 		s.codeBuddyOAuth.close()

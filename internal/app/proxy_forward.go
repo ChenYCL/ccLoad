@@ -21,6 +21,7 @@ import (
 	"ccLoad/internal/cooldown"
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
+	cliproxyutil "ccLoad/internal/protocol/cliproxy/util"
 	"ccLoad/internal/util"
 	"ccLoad/internal/xaiauth"
 	"ccLoad/internal/zedauth"
@@ -267,6 +268,9 @@ func (s *Server) buildProxyRequest(
 		if err = validateAnthropicLegacySystemRequestForUpstream(body, hdr, parsedUpstreamURL); err != nil {
 			return nil, err
 		}
+		if cfg.UsesXAIOAuth() {
+			body, _ = cliproxyutil.EnsureClaudeToolsDescriptions(body)
+		}
 	}
 
 	// 1.8 Codex Responses 缓存提示：向 body 注入 prompt_cache_key
@@ -347,6 +351,9 @@ func (s *Server) buildProxyRequest(
 	} else if isZAICodingPlanRequest(cfg, upstreamProtocol, requestPath) {
 		injectZAICodingPlanHeaders(req, cfg, apiKey, body, hdr)
 		wireRebuilt = true
+	} else if cfg.UsesGitHubCopilotOAuth() {
+		injectGitHubCopilotHeaders(req, cfg, apiKey, hdr, upstreamProtocol)
+		wireRebuilt = true
 	} else if anthropicClaudeCodeWire {
 		injectAnthropicAPIKeyHeaders(req, cfg, apiKey, body, hdr)
 		wireRebuilt = true
@@ -373,6 +380,15 @@ func (s *Server) buildProxyRequest(
 		}
 		ensureOpenCodeSessionHeader(req.Header, hdr, executionIdentity)
 	}
+	if anthropicClaudeCodeWire {
+		// Header rules have the last word on anthropic-beta. Strip fields gated
+		// by absent tokens from the actual wire body, then refresh any CCH.
+		var sanitizeErr error
+		body, sanitizeErr = applyFinalAnthropicBetaBodyPolicy(req, body)
+		if sanitizeErr != nil {
+			return nil, sanitizeErr
+		}
+	}
 	// 7. 非 Anthropic 上游：移除 Anthropic 协议专属头（anthropic-version/anthropic-beta 等）
 	stripAnthropicProtocolHeaders(req, runtimeUpstreamProtocol(reqCtx))
 
@@ -385,6 +401,30 @@ func (s *Server) buildProxyRequest(
 	}
 
 	return req, nil
+}
+
+// applyFinalAnthropicBetaBodyPolicy strips body fields that require Anthropic
+// beta tokens missing from the final request header. Message-level
+// output_config without per-turn-control is the production 400 case.
+func applyFinalAnthropicBetaBodyPolicy(req *http.Request, body []byte) ([]byte, error) {
+	if req == nil {
+		return body, nil
+	}
+	sanitized := sanitizeAnthropicBodyForBetaTokens(body, normalizedAnthropicBetaHeader(req.Header))
+	if bytes.Equal(sanitized, body) {
+		return body, nil
+	}
+	if _, signed := anthropicCCHDigitsOffset(sanitized); signed {
+		var err error
+		sanitized, err = finalizeAnthropicCCH(sanitized)
+		if err != nil {
+			return nil, err
+		}
+	}
+	req.Body = io.NopCloser(bytes.NewReader(sanitized))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sanitized)), nil }
+	req.ContentLength = int64(len(sanitized))
+	return sanitized, nil
 }
 
 // prepareTranslatedUpstreamBody 是协议转换后的统一 body 最终化入口。
@@ -442,16 +482,16 @@ func (s *Server) prepareTranslatedUpstreamBody(
 			if isAnthropicJSONObject(body) {
 				helperShape := nativeAnthropicHaikuHelperShape(body, headers)
 				if helperShape == anthropicHaikuHelperMinimal {
-					return finishAnthropicPassthrough(body, false)
+					return finishAnthropicPassthrough(body, false, cfg, headers)
 				}
 				if helperShape == anthropicHaikuHelperStructured ||
 					isNativeAnthropicClaudeCodeRequest(headers) {
-					return finishAnthropicPassthrough(body, cchSigning)
+					return finishAnthropicPassthrough(body, cchSigning, cfg, headers)
 				}
 			}
 			body, err = normalizeAnthropicMessagesBody(body)
 			if err == nil {
-				body, err = finishAnthropicPassthrough(body, cchSigning)
+				body, err = finishAnthropicPassthrough(body, cchSigning, cfg, headers)
 			}
 		default:
 			body, err = finalizeAnthropicClaudeCodeMessagesBody(body, cfg, apiKey, headers, target)
@@ -2888,6 +2928,9 @@ func (s *Server) forwardAttempt(
 			missingStoredItemRetries++
 		}
 		retryStrategies = append(retryStrategies, retryStrategy)
+		if retryStrategy == stripAnthropicInvalidThinkingSignatureStrategy {
+			rememberAnthropicThinkingOmit(reqCtx.header, retrySourcePlan.TranslatedBody)
+		}
 		retryPlan := plan
 		retryPlan.TranslatedBody = retryBody
 		// 可复用的 WS 连接优先发 attempt.incrementalBody。status
@@ -3191,7 +3234,7 @@ func retryBodyForRejectedRequest(
 	plan protocol.TransformPlan,
 	res *fwResult,
 ) ([]byte, string, bool) {
-	if retryBody, strategy, ok := anthropicRetryBodyFor400(upstreamProtocol, plan, res); ok {
+	if retryBody, strategy, ok := anthropicRetryBodyFor400(upstreamProtocol, cfg, plan, res); ok {
 		return retryBody, strategy, true
 	}
 	if retryBody, strategy, ok := responsesRetryBodyForUnknownParameter(upstreamProtocol, plan, res); ok {
@@ -3733,9 +3776,11 @@ func (s *Server) attemptKeyAcrossURLs(
 		})
 
 		shouldDeferChannelCooldown := urlIdx < len(sortedURLs)-1
+		sessionID := protocolCapabilitySessionID(reqCtx)
 		capabilityKey := protocolCapabilityKey{
 			channelID: cfg.ID, baseURL: attemptBaseURL,
 			clientProtocol: clientProtocol, requestFamily: requestFamily,
+			sessionID: sessionID,
 		}
 		if urlEntry.idx < 0 || urlEntry.idx >= len(cfg.URLs) {
 			return nil, nil, fmt.Errorf("invalid URL selector index %d for channel %d", urlEntry.idx, cfg.ID)
@@ -3756,7 +3801,7 @@ func (s *Server) attemptKeyAcrossURLs(
 			protocolCandidates = []protocol.Protocol{protocol.Codex}
 			declared = true
 		}
-		learnCapability := transformMode == model.ProtocolTransformModeAuto && !declared
+		learnCapability := transformMode == model.ProtocolTransformModeAuto && !declared && sessionID != ""
 		if learnCapability {
 			if cachedProtocol, known := s.protocolCapabilities.get(capabilityKey); known {
 				if cachedProtocol == protocolUnsupported {
@@ -3812,6 +3857,11 @@ func (s *Server) attemptKeyAcrossURLs(
 			if (learnCapability || requestFamily == protocol.RequestFamilyAlphaSearch) &&
 				stableEndpointUnsupported {
 				s.protocolCapabilities.set(capabilityKey, protocolUnsupported)
+				if requestFamily == protocol.RequestFamilyAlphaSearch && sessionID != "" {
+					endpointKey := capabilityKey
+					endpointKey.sessionID = ""
+					s.protocolCapabilities.set(endpointKey, protocolUnsupported)
+				}
 			}
 		}
 
@@ -4000,6 +4050,9 @@ func (s *Server) tryChannelWithKeys(ctx context.Context, cfg *model.Config, reqC
 	}
 	if cfg.UsesZedOAuth() {
 		return s.tryZedOAuthChannel(ctx, cfg, reqCtx, w)
+	}
+	if cfg.UsesGitHubCopilotOAuth() {
+		return s.tryGitHubCopilotOAuthChannel(ctx, cfg, reqCtx, w)
 	}
 
 	// 查询渠道的API Keys（缓存优先，缓存不可用自动降级到数据库查询）
@@ -4365,6 +4418,27 @@ func (s *Server) tryZedOAuthChannel(
 		return cfg, credential.AccessToken, err
 	}, func(result *proxyResult) bool {
 		return result != nil && !result.succeeded && zedCredentialRejected(result.status, result.body)
+	})
+}
+
+func (s *Server) tryGitHubCopilotOAuthChannel(
+	ctx context.Context,
+	cfg *model.Config,
+	reqCtx *proxyRequestContext,
+	w http.ResponseWriter,
+) (*proxyResult, error) {
+	return s.tryOAuthChannel(ctx, cfg, reqCtx, w, "GitHub Copilot", false, func(forceRefresh bool, _ string) (*model.Config, string, error) {
+		credential, err := s.githubCopilotCredentials.credential(ctx, cfg, forceRefresh)
+		if credential == nil {
+			return cfg, "", err
+		}
+		runtimeCfg := cfg.Clone()
+		if endpoint := credential.Endpoint(); endpoint != "" && len(runtimeCfg.URLs) > 0 {
+			runtimeCfg.URLs[0].URL = endpoint
+		}
+		return runtimeCfg, credential.CopilotToken, err
+	}, func(result *proxyResult) bool {
+		return result != nil && result.status == http.StatusUnauthorized
 	})
 }
 

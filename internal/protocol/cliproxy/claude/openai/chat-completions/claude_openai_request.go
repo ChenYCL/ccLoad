@@ -340,7 +340,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					anthropicTool = common.AttachCacheControl(anthropicTool, function)
 				}
 
-				anthropicTools = append(anthropicTools, anthropicTool)
+				anthropicTools = append(anthropicTools, util.EnsureClaudeToolDescription(anthropicTool))
 			}
 			return true
 		})

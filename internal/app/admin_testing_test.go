@@ -6584,7 +6584,7 @@ func TestAdminTestNativeAnthropicDoesNotDoubleAppendHeaderRules(t *testing.T) {
 			"User-Agent": {"claude-cli/2.1.220 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {helperBetas},
 			"Anthropic-Version": {"2023-06-01"}, "Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 			"X-Claude-Code-Session-Id": {sessionID}, "X-Client-Request-Id": {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
-			"X-Stainless-Lang": {"js"}, "X-Stainless-Runtime": {"node"}, "X-Stainless-Package-Version": {"0.94.0"},
+			"X-Stainless-Lang": {"js"}, "X-Stainless-Runtime": {"node"}, "X-Stainless-Package-Version": {anthropicStainlessPackageVersion},
 			"X-Stainless-Runtime-Version": {"v26.3.0"}, "X-Stainless-OS": {"MacOS"}, "X-Stainless-Arch": {"arm64"},
 			"X-Stainless-Retry-Count": {"0"}, "X-Stainless-Timeout": {"600"},
 		},

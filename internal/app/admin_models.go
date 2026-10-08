@@ -14,6 +14,7 @@ import (
 
 	"ccLoad/internal/codebuddyauth"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
 	"ccLoad/internal/util"
@@ -572,6 +573,9 @@ func (s *Server) fetchModelsForChannel(
 	if cfg.UsesZedOAuth() {
 		return sortOAuthFetchModels(s.fetchZedOAuthModels(ctx, cfg, overrideProtocol))
 	}
+	if cfg.UsesGitHubCopilotOAuth() {
+		return sortOAuthFetchModels(s.fetchGitHubCopilotOAuthModels(ctx, cfg, overrideProtocol))
+	}
 	if cfg.UsesAntigravityOAuth() {
 		return sortOAuthFetchModels(s.fetchAntigravityModelsWithURLFallback(ctx, cfg, overrideProtocol))
 	}
@@ -749,6 +753,48 @@ func (s *Server) fetchZAIOAuthModels(
 		Debug: &FetchModelsDebug{
 			NormalizedProtocol: util.ProtocolAnthropic,
 			Fetcher:            "zai_coding_plan_catalog", ChannelURL: channelURL,
+		},
+	}, nil
+}
+
+func (s *Server) fetchGitHubCopilotOAuthModels(
+	ctx context.Context,
+	cfg *model.Config,
+	overrideProtocol string,
+) (*FetchModelsResponse, error) {
+	overrideProtocol = strings.ToLower(strings.TrimSpace(overrideProtocol))
+	if overrideProtocol != "" && !protocol.IsValid(protocol.Protocol(overrideProtocol)) {
+		return nil, fmt.Errorf("不支持的上游协议: %s", overrideProtocol)
+	}
+	names, source := githubcopilotauth.DefaultModels, "predefined"
+	credential, err := githubcopilotauth.ParseCredential([]byte(cfg.OAuthCredential))
+	if err != nil {
+		return nil, fmt.Errorf("模型发现: 解析 GitHub Copilot 凭证失败: %w", err)
+	}
+	if s != nil && s.githubCopilotService != nil {
+		if live, listErr := s.githubCopilotService.FetchModels(ctx, credential.CopilotToken, credential.Endpoint()); listErr != nil {
+			log.Printf("[WARN] GitHub Copilot 模型目录不可用，回退内置列表 (channel=%d): %v", cfg.ID, listErr)
+		} else if len(live) > 0 {
+			names, source = live, "api"
+		}
+	}
+	models := make([]model.ModelEntry, len(names))
+	for i, name := range names {
+		models[i] = model.ModelEntry{Model: name}
+	}
+	proto := util.ProtocolAnthropic
+	if overrideProtocol != "" {
+		proto = util.NormalizeProtocol(overrideProtocol)
+	}
+	channelURL := ""
+	if len(cfg.URLs) > 0 {
+		channelURL = cfg.URLs[0].RuntimeURL()
+	}
+	return &FetchModelsResponse{
+		Models: models, Protocol: proto, Source: source,
+		Debug: &FetchModelsDebug{
+			NormalizedProtocol: proto,
+			Fetcher:            "github_copilot_catalog", ChannelURL: channelURL,
 		},
 	}, nil
 }

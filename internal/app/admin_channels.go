@@ -17,6 +17,7 @@ import (
 	"ccLoad/internal/codebuddyauth"
 	"ccLoad/internal/codexauth"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/util"
 	"ccLoad/internal/xaiauth"
@@ -532,6 +533,14 @@ func channelOAuthMetadataFromCredential(cfg *model.Config) channelOAuthMetadata 
 		usage, _, _ := persistedOAuthUsage(credential.OAuthUsage, zaiauth.ChannelType)
 		return channelOAuthMetadata{oauthUsage: usage}
 	}
+	if cfg.UsesGitHubCopilotOAuth() {
+		credential, err := githubcopilotauth.ParseCredential([]byte(cfg.OAuthCredential))
+		if err != nil {
+			return channelOAuthMetadata{}
+		}
+		usage, _, _ := persistedOAuthUsage(credential.OAuthUsage, githubcopilotauth.ChannelType)
+		return channelOAuthMetadata{oauthUsage: usage}
+	}
 	if cfg.UsesCodeBuddyOAuth() {
 		credential, err := codebuddyauth.ParseCredential([]byte(cfg.OAuthCredential))
 		if err != nil {
@@ -914,6 +923,12 @@ func oauthSyntheticKeyFields(cfg *model.Config) (accessToken, note string, err e
 			return "", "", err
 		}
 		return credential.AccessToken, "Zed LLM JWT", nil
+	case cfg.UsesGitHubCopilotOAuth():
+		credential, err := githubcopilotauth.ParseCredential([]byte(cfg.OAuthCredential))
+		if err != nil {
+			return "", "", err
+		}
+		return credential.CopilotToken, "GitHub Copilot token", nil
 	}
 	return "", "", nil
 }

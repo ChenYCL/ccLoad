@@ -506,7 +506,7 @@ async function editChannel(id) {
   const protocolModeRenderPromise = ensureProtocolTransformModeCombobox(channel.protocol_transform_mode);
 
   editingChannelId = id;
-  editingChannelAuthType = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(channel.auth_type)
+  editingChannelAuthType = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'github_copilot_oauth'].includes(channel.auth_type)
     ? channel.auth_type
     : 'api_key';
   clearChannelDuplicateHint();
@@ -830,7 +830,7 @@ async function saveChannel(event) {
     return;
   }
 
-  const isOAuth = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType);
+  const isOAuth = ['codebuddy_oauth', 'codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'github_copilot_oauth'].includes(editingChannelAuthType);
   const validKeyRows = isOAuth ? [] : getValidInlineKeyRows();
   if (validKeyRows.some(row => !Number.isInteger(row.priority) || row.priority < -99999 || row.priority > 9999999)) {
     if (window.showError) window.showError(window.t('channels.keyPriorityInvalid'));
@@ -3492,7 +3492,7 @@ async function fetchModelsFromAPI() {
   let fetchOptions;
   let modelFetchEntries = [];
   let skippedKeyCount = 0;
-  if (['codebuddy_oauth', 'antigravity_oauth', 'codex_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth'].includes(editingChannelAuthType)) {
+  if (['codebuddy_oauth', 'antigravity_oauth', 'codex_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'github_copilot_oauth'].includes(editingChannelAuthType)) {
     if (!editingChannelId) {
       if (window.showError) window.showError(window.t('channels.saveBeforeModelTest'));
       else alert(window.t('channels.saveBeforeModelTest'));

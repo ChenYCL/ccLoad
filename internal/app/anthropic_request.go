@@ -151,6 +151,56 @@ func deleteAnthropicOutputEffort(body []byte) []byte {
 	return body
 }
 
+// sanitizeAnthropicBodyForBetaTokens keeps beta-gated request fields in sync
+// with the final upstream header, including channel Header rules.
+func sanitizeAnthropicBodyForBetaTokens(body []byte, betaHeader string) []byte {
+	activeBetas := make(map[string]bool)
+	for _, part := range strings.Split(betaHeader, ",") {
+		if token := strings.TrimSpace(part); token != "" {
+			activeBetas[token] = true
+		}
+	}
+	hasBeta := func(tokens ...string) bool {
+		for _, token := range tokens {
+			if activeBetas[token] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, field := range []struct {
+		path  string
+		betas []string
+	}{
+		{"context_management", []string{"context-management-2025-06-27"}},
+		{"thinking.block_binding", []string{"thinking-binding-controls-2026-08-01"}},
+		{"fallbacks", []string{"server-side-fallback-2026-07-01"}},
+		{"fallback_credit_token", []string{"server-side-fallback-2026-07-01", "fallback-credit-2026-07-01", "fallback-credit-2026-06-01"}},
+	} {
+		if !hasBeta(field.betas...) && gjson.GetBytes(body, field.path).Exists() {
+			body = deleteJSONPath(body, field.path)
+		}
+	}
+	// 2.1.283+ carries message-level output_config behind per-turn-control.
+	// Without that beta Anthropic returns messages.N.output_config Extra inputs.
+	if !hasBeta("per-turn-control-2026-07-01", "mid-conversation-output-config-2026-07-01") {
+		for index, message := range gjson.GetBytes(body, "messages").Array() {
+			if message.Get("output_config").Exists() {
+				body = deleteJSONPath(body, "messages."+strconv.Itoa(index)+".output_config")
+			}
+		}
+	}
+	// display:"updates" needs thinking-display-updates-2026-08-18. Drop the
+	// field (model default omitted) instead of killing adaptive thinking.
+	if !hasBeta("thinking-display-updates-2026-08-18") {
+		display := strings.TrimSpace(jsonStringValue(gjson.GetBytes(body, "thinking.display")))
+		if strings.EqualFold(display, "updates") {
+			body = deleteJSONPath(body, "thinking.display")
+		}
+	}
+	return body
+}
+
 func normalizeAnthropicSampling(body []byte) []byte {
 	// Claude Code does not forward caller sampling knobs. Keeping both temperature
 	// and top_p is invalid, and thinking requests reject top_k as well.

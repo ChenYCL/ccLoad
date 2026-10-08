@@ -11,6 +11,7 @@ import (
 	"ccLoad/internal/codebuddyauth"
 	"ccLoad/internal/codexauth"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/xaiauth"
 	"ccLoad/internal/zaiauth"
@@ -123,6 +124,12 @@ func (s *Server) HandleChannelEditor(c *gin.Context) {
 	} else if cfg.UsesZedOAuth() {
 		_, parseErr := zedauth.ParseCredential([]byte(cfg.OAuthCredential))
 		if parseErr != nil {
+			RespondError(c, http.StatusInternalServerError, parseErr)
+			return
+		}
+		oauthCredential = append(json.RawMessage(nil), cfg.OAuthCredential...)
+	} else if cfg.UsesGitHubCopilotOAuth() {
+		if _, parseErr := githubcopilotauth.ParseCredential([]byte(cfg.OAuthCredential)); parseErr != nil {
 			RespondError(c, http.StatusInternalServerError, parseErr)
 			return
 		}

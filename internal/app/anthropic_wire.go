@@ -24,9 +24,13 @@ import (
 
 const (
 	// anthropicCLIVersion 是伪造官方 Anthropic 线路时写入的 Claude Code UA/账单版本。
-	// Fable 5.1（claude-fable-5-1）会拒绝低于 2.1.251 的客户端。
-	anthropicCLIVersion  = "2.1.258"
+	// 低于此版本的客户端会被抬到该钉；不低于钉的原生请求仍直通。
+	anthropicCLIVersion  = "2.1.293"
 	anthropicBillingSalt = "59cf53e54c78"
+
+	// Claude Code 2.1.293 随附的 @anthropic-ai/sdk / Node 运行时（对齐官方抓包配对）。
+	anthropicStainlessPackageVersion = "0.128.0"
+	anthropicStainlessRuntimeVersion = "v26.3.0"
 
 	// anthropicClaudeCodeIdentityPrompt 是 Claude Code CLI system 三段式的第二段。
 	anthropicClaudeCodeIdentityPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -163,10 +167,10 @@ func finalizeAnthropicClaudeCodeMessagesBody(
 	cchSigning := anthropicCCHSigningEnabled(cfg, target)
 	helperShape := nativeAnthropicHaikuHelperShape(body, headers)
 	if helperShape != anthropicHaikuHelperNone {
-		return finishAnthropicPassthrough(body, helperShape == anthropicHaikuHelperStructured && cchSigning)
+		return finishAnthropicPassthrough(body, helperShape == anthropicHaikuHelperStructured && cchSigning, cfg, headers)
 	}
 	if isNativeAnthropicClaudeCodeRequest(headers) {
-		return finishAnthropicPassthrough(body, cchSigning)
+		return finishAnthropicPassthrough(body, cchSigning, cfg, headers)
 	}
 	body = normalizeAnthropicOAuthModel(body)
 	// 缓存窗口归调用方：调用方自己声明了 1h，网关注入的 breakpoint 就跟到 1h，否则
@@ -230,17 +234,24 @@ func finalizeAnthropicClaudeCodeMessagesBody(
 		body = deleteJSONPath(body, "context_management")
 	}
 
-	return finishAnthropicPassthrough(encodeNormalizedAnthropicRequest(body), cchSigning)
+	return finishAnthropicPassthrough(encodeNormalizedAnthropicRequest(body), cchSigning, cfg, headers)
 }
 
 // finishAnthropicPassthrough is the single Anthropic Messages outbound exit.
 // Fingerprint rewrite (system cloak, sampling, cache stamps) happens before
 // this, or is skipped for native Claude Code / Haiku helper. This layer only
-// applies API-contract invariants and optional CCH, so new Anthropic 400
-// guards extend applyAnthropicMessagesAPIInvariants instead of growing every
-// early-return branch.
-func finishAnthropicPassthrough(body []byte, signCCH bool) ([]byte, error) {
+// applies API-contract invariants, official-Anthropic thinking camouflage,
+// and optional CCH, so new Anthropic 400 guards extend
+// applyAnthropicMessagesAPIInvariants instead of growing every early-return
+// branch.
+func finishAnthropicPassthrough(body []byte, signCCH bool, cfg *model.Config, headers http.Header) ([]byte, error) {
 	body = applyAnthropicMessagesAPIInvariants(body)
+	if cloaked, ok := cloakOfficialAnthropicThinkingHistory(cfg, body); ok {
+		body = cloaked
+	}
+	if omitted, ok := omitRememberedAnthropicThinkingHistory(cfg, headers, body); ok {
+		body = omitted
+	}
 	if !signCCH {
 		return body, nil
 	}
@@ -508,7 +519,7 @@ func matchesAnthropicHaikuHelperHeaders(headers http.Header, body []byte, shape 
 	expected := map[string]string{
 		"Accept": "application/json", "Content-Type": "application/json", "X-Stainless-Lang": "js",
 		"X-Stainless-Runtime": "node", "X-Stainless-Retry-Count": "0", "X-Stainless-Timeout": "600",
-		"X-Stainless-Package-Version": "0.94.0", "X-Stainless-Runtime-Version": "v26.3.0",
+		"X-Stainless-Package-Version": anthropicStainlessPackageVersion, "X-Stainless-Runtime-Version": anthropicStainlessRuntimeVersion,
 		"Anthropic-Version": "2023-06-01", "Anthropic-Dangerous-Direct-Browser-Access": "true",
 	}
 	for name, want := range expected {
@@ -625,9 +636,18 @@ func normalizeAnthropicOAuthModel(body []byte) []byte {
 // 同一个判据同时服务入站与出站：网关自己产出的 body 一样通过检测，不存在「自己不认
 // 自己」的自指。
 func isNativeAnthropicClaudeCodeRequest(headers http.Header) bool {
-	return validAnthropicClaudeCLIUserAgent(anthropicHeaderValue(headers, "User-Agent")) &&
-		anthropicHeaderValue(headers, "X-App") == "cli" &&
-		slices.Contains(strings.Split(normalizedAnthropicBetaHeader(headers), ","), "claude-code-20250219")
+	if !validAnthropicClaudeCLIUserAgent(anthropicHeaderValue(headers, "User-Agent")) ||
+		anthropicHeaderValue(headers, "X-App") != "cli" ||
+		!slices.Contains(strings.Split(normalizedAnthropicBetaHeader(headers), ","), "claude-code-20250219") {
+		return false
+	}
+	// 过旧的官方 CLI 直通会被 Anthropic 以 400 拒绝新模型。版本低于伪造钉时走重写，
+	// 把 UA/账单升到 anthropicCLIVersion；不低于钉的原生请求仍直通，避免拆 cache。
+	if version := anthropicUserAgentVersion(headers); version != "" &&
+		!anthropicCLIVersionGTE(version, anthropicCLIVersion) {
+		return false
+	}
+	return true
 }
 
 func validAnthropicClaudeCLIUserAgent(userAgent string) bool {
@@ -1170,15 +1190,53 @@ func anthropicBillingHeader(firstUserText, clientVersion string) string {
 	return "x-anthropic-billing-header: cc_version=" + clientVersion + "." + fingerprint + "; cc_entrypoint=cli;"
 }
 
-// anthropicClientVersion keeps the caller's real Claude Code version when its
-// User-Agent has the documented CLI shape. Other clients receive the built-in
-// fallback so arbitrary User-Agent text cannot leak into the billing block.
-func anthropicClientVersion(headers http.Header) string {
+func anthropicUserAgentVersion(headers http.Header) string {
 	matches := anthropicClaudeCLIUserAgentPattern.FindStringSubmatch(
 		strings.TrimSpace(anthropicHeaderValue(headers, "User-Agent")),
 	)
 	if len(matches) > 1 {
 		return matches[1]
+	}
+	return ""
+}
+
+func anthropicCLIVersionGTE(version, min string) bool {
+	v, vok := parseAnthropicCLIVersion(version)
+	m, mok := parseAnthropicCLIVersion(min)
+	if !vok || !mok {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if v[i] != m[i] {
+			return v[i] > m[i]
+		}
+	}
+	return true
+}
+
+func parseAnthropicCLIVersion(version string) ([3]int, bool) {
+	var out [3]int
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
+
+// anthropicClientVersion keeps a current Claude Code version on the wire.
+// Callers older than anthropicCLIVersion are raised to the pin so Anthropic
+// does not 400 new models; newer official CLIs keep their real version.
+func anthropicClientVersion(headers http.Header) string {
+	if version := anthropicUserAgentVersion(headers); version != "" &&
+		anthropicCLIVersionGTE(version, anthropicCLIVersion) {
+		return version
 	}
 	return anthropicCLIVersion
 }
@@ -1204,7 +1262,7 @@ func injectAnthropicOAuthHeaders(
 	}
 	setRawHeader(req.Header, "Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	applyAnthropicClaudeCodeHeaders(
-		req, anthropicClaudeCodeBetas(body), resolveAnthropicSessionID(body, cfg, "", incoming),
+		req, anthropicClaudeCodeBetas(body, true), resolveAnthropicSessionID(body, cfg, "", incoming),
 		anthropicClientVersion(incoming),
 	)
 }
@@ -1232,7 +1290,7 @@ func injectAnthropicAPIKeyHeaders(
 	}
 	applyAnthropicAPIKeyAuth(req, apiKey)
 	applyAnthropicClaudeCodeHeaders(
-		req, anthropicClaudeCodeBetas(body), resolveAnthropicSessionID(body, cfg, apiKey, incoming),
+		req, anthropicClaudeCodeBetas(body, false), resolveAnthropicSessionID(body, cfg, apiKey, incoming),
 		anthropicClientVersion(incoming),
 	)
 }
@@ -1290,18 +1348,20 @@ func applyAnthropicNativeHeaders(req *http.Request, incoming http.Header) {
 	}
 }
 
-// anthropicClaudeCodeBetas 组装 Claude Code CLI 的 Anthropic-Beta 集合。
-//
-// 这里没有「OAuth 版」和「API Key 版」两套集合：betas 必须与
-// finalizeAnthropicClaudeCodeMessagesBody 产出的 body 形态严格对应，拆成两套就会
-// 出现 body 用了某能力、header 没声明对应 beta 的 400。CCH 是独立的凭证签名边界，
-// 不参与 beta 集合分支。同源是双向的：extended-cache-ttl-2025-04-11 跟随 body 里
-// 实际存在的 cache_control.ttl——缓存窗口由调用方的原始请求决定，网关不主动升级
-// 到 1h，也就不替它声明这个 beta。
-func anthropicClaudeCodeBetas(body []byte) string {
-	betas := make([]string, 0, 14)
-	betas = append(betas, "claude-code-20250219", "oauth-2025-04-20", "interleaved-thinking-2025-05-14")
-	if strings.TrimSpace(jsonStringValue(gjson.GetBytes(body, "thinking.display"))) == "" {
+// anthropicClaudeCodeBetas 按官方 Claude Code 主循环顺序组装 anthropic-beta：
+// 基础表 → mid-conversation → per-turn → tool search → clear-at → effort →
+// thinking-binding(OAuth) → display-updates → fast → cache-ttl → diagnosis。
+// oauth=true 时对齐官方 OAuth 抓包（含 thinking-binding 与默认 1h cache ttl 声明）。
+// API Key 的 extended-cache-ttl 仍跟随 body 里实际存在的 cache_control.ttl。
+func anthropicClaudeCodeBetas(body []byte, oauth bool) string {
+	betas := make([]string, 0, 18)
+	betas = append(betas, "claude-code-20250219")
+	if oauth {
+		betas = append(betas, "oauth-2025-04-20")
+	}
+	betas = append(betas, "interleaved-thinking-2025-05-14")
+	display := strings.TrimSpace(jsonStringValue(gjson.GetBytes(body, "thinking.display")))
+	if display == "" {
 		betas = append(betas, "redact-thinking-2026-02-12")
 	}
 	betas = append(betas,
@@ -1309,17 +1369,33 @@ func anthropicClaudeCodeBetas(body []byte) string {
 		"context-management-2025-06-27",
 		"prompt-caching-scope-2026-01-05",
 	)
-	if !anthropicUsesLegacySystemReminder(jsonStringValue(gjson.GetBytes(body, "model"))) {
+	midConversation := !anthropicUsesLegacySystemReminder(jsonStringValue(gjson.GetBytes(body, "model")))
+	if midConversation {
 		betas = append(betas, "mid-conversation-system-2026-04-07")
+	}
+	if anthropicHasMessageOutputConfig(body) {
+		betas = append(betas, "per-turn-control-2026-07-01")
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && jsonMemberCount(tools) > 0 {
 		betas = append(betas, "advanced-tool-use-2025-11-20")
 	}
+	if midConversation {
+		betas = append(betas, "mid-conversation-system-clear-at-2026-08-21")
+	}
 	betas = append(betas, "effort-2025-11-24", "fallback-credit-2026-06-01")
+	if oauth || gjson.GetBytes(body, "thinking.block_binding").Exists() {
+		betas = append(betas, "thinking-binding-controls-2026-08-01")
+	}
+	if strings.EqualFold(display, "updates") {
+		betas = append(betas, "thinking-display-updates-2026-08-18")
+	}
+	if gjson.GetBytes(body, "output_config.format").Exists() {
+		betas = append(betas, "structured-outputs-2025-12-15")
+	}
 	if strings.EqualFold(strings.TrimSpace(jsonStringValue(gjson.GetBytes(body, "speed"))), "fast") {
 		betas = append(betas, "fast-mode-2026-02-01")
 	}
-	if anthropicRequestHasCacheControl(body, anthropicCacheControlHasTTL) {
+	if oauth || anthropicRequestHasCacheControl(body, anthropicCacheControlHasTTL) {
 		betas = append(betas, "extended-cache-ttl-2025-04-11")
 	}
 	if gjson.GetBytes(body, "diagnostics").IsObject() {
@@ -1348,6 +1424,20 @@ func anthropicUsesLegacySystemReminder(modelName string) bool {
 	}
 }
 
+// anthropicHasMessageOutputConfig reports mid-conversation system messages that
+// carry per-turn output_config. Official Anthropic requires
+// per-turn-control-2026-07-01 (or the legacy mid-conversation-output-config
+// beta) for those fields.
+func anthropicHasMessageOutputConfig(body []byte) bool {
+	for _, message := range gjson.GetBytes(body, "messages").Array() {
+		if strings.EqualFold(strings.TrimSpace(jsonStringValue(message.Get("role"))), "system") &&
+			message.Get("output_config").IsObject() {
+			return true
+		}
+	}
+	return false
+}
+
 func applyAnthropicClaudeCodeHeaders(req *http.Request, betas, sessionID, clientVersion string) {
 	setRawHeader(req.Header, "Accept", "application/json")
 	setRawHeader(req.Header, "Content-Type", "application/json")
@@ -1356,10 +1446,10 @@ func applyAnthropicClaudeCodeHeaders(req *http.Request, betas, sessionID, client
 	setRawHeader(req.Header, "X-Stainless-Arch", anthropicStainlessArch())
 	setRawHeader(req.Header, "X-Stainless-Lang", "js")
 	setRawHeader(req.Header, "X-Stainless-OS", anthropicStainlessOS())
-	setRawHeader(req.Header, "X-Stainless-Package-Version", "0.94.0")
+	setRawHeader(req.Header, "X-Stainless-Package-Version", anthropicStainlessPackageVersion)
 	setRawHeader(req.Header, "X-Stainless-Retry-Count", "0")
 	setRawHeader(req.Header, "X-Stainless-Runtime", "node")
-	setRawHeader(req.Header, "X-Stainless-Runtime-Version", "v26.3.0")
+	setRawHeader(req.Header, "X-Stainless-Runtime-Version", anthropicStainlessRuntimeVersion)
 	setRawHeader(req.Header, "X-Stainless-Timeout", "600")
 	setRawHeader(req.Header, "anthropic-beta", betas)
 	setRawHeader(req.Header, "anthropic-dangerous-direct-browser-access", "true")

@@ -555,7 +555,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		if toolName != "" {
 			includedToolNames[toolName] = struct{}{}
 		}
-		toolItems = append(toolItems, tJSON)
+		toolItems = append(toolItems, util.EnsureClaudeToolDescription(tJSON))
 	}
 	toolNameMap = responsesToolNameMap(root, includedToolNames)
 	if len(toolItems) > 0 {

@@ -67,6 +67,10 @@ const OAUTH_PROVIDER_CONFIGS = Object.freeze({
   zed: Object.freeze({
     provider: 'zed', label: 'Zed', i18n: 'channels.zed',
     callbackPlaceholder: 'http://localhost:PORT/?user_id=...&access_token=...'
+  }),
+  'github-copilot': Object.freeze({
+    provider: 'github-copilot', label: 'GitHub Copilot', i18n: 'channels.githubCopilot',
+    callbackPlaceholder: '', pollOnly: true
   })
 });
 
@@ -146,7 +150,8 @@ function applyChannelAuthEditorMode(
   const zaiOAuth = authType === 'zai_oauth';
   const cursorOAuth = authType === 'cursor_oauth';
   const zedOAuth = authType === 'zed_oauth';
-  const credentialVisible = codexOAuth || authType === 'antigravity_oauth' || authType === 'codebuddy_oauth' || xaiOAuth || anthropicOAuth || zaiOAuth || cursorOAuth || zedOAuth;
+  const githubCopilotOAuth = authType === 'github_copilot_oauth';
+  const credentialVisible = codexOAuth || authType === 'antigravity_oauth' || authType === 'codebuddy_oauth' || xaiOAuth || anthropicOAuth || zaiOAuth || cursorOAuth || zedOAuth || githubCopilotOAuth;
   const oauth = credentialVisible;
   const notice = document.getElementById('codexCredentialReadOnlyNotice');
   const keyHeader = document.getElementById('channelAPIKeyHeader');
@@ -627,6 +632,8 @@ function syncOAuthProviderFields() {
       ? 'channels.codex.personalAccessTokenDescription'
       : zed
       ? 'channels.zed.oauthDescription'
+      : provider === 'github-copilot'
+      ? 'channels.githubCopilot.sessionDescription'
       : cursor
       ? 'channels.cursor.apiKeyDescription'
       : zai
@@ -1663,7 +1670,8 @@ function oauthCredentialCleanupProviderLabel(authType) {
     zai_oauth: 'Z.ai',
     cursor_oauth: 'Cursor',
     zed_oauth: 'Zed',
-    codebuddy_oauth: 'CodeBuddy'
+    codebuddy_oauth: 'CodeBuddy',
+    github_copilot_oauth: 'GitHub Copilot'
   })[authType] || authType;
 }
 
@@ -2080,6 +2088,8 @@ function oauthCredentialRefreshTarget(authType) {
       return { resource: 'xai-credential', label: 'xAI', i18n: 'channels.xai', keyNote: 'xAI OAuth AT' };
     case 'zai_oauth':
       return { resource: 'zai-credential', label: 'Z.ai', i18n: 'channels.zai', keyNote: 'Z.ai Coding Plan Key', tokenField: 'api_key' };
+    case 'github_copilot_oauth':
+      return { resource: 'github-copilot-credential', label: 'GitHub Copilot', i18n: 'channels.githubCopilot', keyNote: 'GitHub Copilot token', tokenField: 'copilot_token' };
     case 'codex_oauth':
       return { resource: 'codex-credential', label: 'Codex', i18n: 'channels.codex', keyNote: 'Codex OAuth AT' };
     default:
@@ -2453,7 +2463,7 @@ async function batchRefreshSelectedOAuthUsage(fetcher = fetchWithAuth) {
     if (typeof channelShowsOAuthUsage === 'function') {
       return channelShowsOAuthUsage(channel);
     }
-    return channel && ['codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'codebuddy_oauth'].includes(channel.auth_type);
+    return channel && ['codex_oauth', 'antigravity_oauth', 'xai_oauth', 'anthropic_oauth', 'zai_oauth', 'cursor_oauth', 'zed_oauth', 'codebuddy_oauth', 'github_copilot_oauth'].includes(channel.auth_type);
   });
   const skipped = selectedIDs.length - eligibleIDs.length;
   if (eligibleIDs.length === 0) {

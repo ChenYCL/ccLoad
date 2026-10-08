@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,7 +10,12 @@ import (
 	"ccLoad/internal/protocol"
 )
 
-const unsupportedProtocolCapabilityTTL = 10 * time.Minute
+const (
+	unsupportedProtocolCapabilityTTL  = 10 * time.Minute
+	protocolUnsupportedBackoffMin     = time.Minute
+	protocolCapabilitySessionTTL      = 15 * time.Minute
+	protocolCapabilityCleanupInterval = time.Minute
+)
 
 // shouldCacheProtocolUnsupported 只缓存稳定的端点级不支持。
 // 400/403/500 与本地转换失败都可能由具体请求形态触发；把它们扩大成整个请求族
@@ -186,11 +192,14 @@ type protocolCapabilityKey struct {
 	baseURL        string
 	clientProtocol protocol.Protocol
 	requestFamily  protocol.RequestFamily
+	sessionID      string
 }
 
 type protocolCapabilityEntry struct {
 	upstream   protocol.Protocol
 	retryAfter time.Time
+	expireAt   time.Time
+	failures   int
 }
 
 type protocolCapabilityCache struct {
@@ -198,13 +207,23 @@ type protocolCapabilityCache struct {
 	entries map[protocolCapabilityKey]protocolCapabilityEntry
 }
 
+func protocolCapabilityIdleExpired(entry protocolCapabilityEntry, now time.Time) bool {
+	return !entry.expireAt.IsZero() && !now.Before(entry.expireAt)
+}
+
+func protocolCapabilityTouchExpireAt(now time.Time) time.Time {
+	return now.Add(protocolCapabilitySessionTTL)
+}
+
 type protocolProbeRetrySummary struct {
 	count   int
 	retryAt time.Time
 }
 
-// get 返回已学习的上游协议。成功条目不过期；known=false 表示未探测，或“不支持”
-// 条目已到重试时间；known=true 且 upstream==protocolUnsupported 表示暂时确认不支持。
+// get 返回已学习的上游协议。条目按空闲 TTL 滑动续期：会话还在请求就留下，
+// 对端停用后到期整条删除，下次再连重新探测。known=false 表示未探测、已释放，
+// 或“不支持”哨兵已到重试时间（仍在空闲窗内则保留 failures 以便下次 set 继续
+// 指数退避）；known=true 且 upstream==protocolUnsupported 表示暂时确认不支持。
 func (c *protocolCapabilityCache) get(key protocolCapabilityKey) (upstream protocol.Protocol, known bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -213,8 +232,17 @@ func (c *protocolCapabilityCache) get(key protocolCapabilityKey) (upstream proto
 	if !ok {
 		return protocolUnsupported, false
 	}
-	if entry.upstream == protocolUnsupported && !time.Now().Before(entry.retryAfter) {
+	now := time.Now()
+	if protocolCapabilityIdleExpired(entry, now) {
 		delete(c.entries, key)
+		return protocolUnsupported, false
+	}
+	entry.expireAt = protocolCapabilityTouchExpireAt(now)
+	c.entries[key] = entry
+	if entry.upstream != protocolUnsupported {
+		return entry.upstream, true
+	}
+	if !now.Before(entry.retryAfter) {
 		return protocolUnsupported, false
 	}
 	return entry.upstream, true
@@ -227,33 +255,61 @@ func (c *protocolCapabilityCache) set(key protocolCapabilityKey, upstream protoc
 	if c.entries == nil {
 		c.entries = make(map[protocolCapabilityKey]protocolCapabilityEntry)
 	}
-	// 成功能力属于稳定的 URL 配置，保留到进程重启或渠道配置变更；只有“不支持”
-	// 哨兵需要定期重试。顺手清掉过期哨兵，避免未再次查询的 key 长期残留。
-	for k, entry := range c.entries {
-		if entry.upstream == protocolUnsupported && !entry.retryAfter.After(now) {
-			delete(c.entries, k)
+	expireAt := protocolCapabilityTouchExpireAt(now)
+	if upstream != protocolUnsupported {
+		c.entries[key] = protocolCapabilityEntry{
+			upstream: upstream,
+			expireAt: expireAt,
+		}
+		return
+	}
+	failures := 1
+	if prev, ok := c.entries[key]; ok && prev.upstream == protocolUnsupported &&
+		!protocolCapabilityIdleExpired(prev, now) {
+		failures = prev.failures + 1
+		if failures < 1 {
+			failures = 1
 		}
 	}
-	entry := protocolCapabilityEntry{upstream: upstream}
-	if upstream == protocolUnsupported {
-		entry.retryAfter = now.Add(unsupportedProtocolCapabilityTTL)
+	c.entries[key] = protocolCapabilityEntry{
+		upstream:   protocolUnsupported,
+		retryAfter: now.Add(unsupportedProtocolBackoff(failures)),
+		expireAt:   expireAt,
+		failures:   failures,
 	}
-	c.entries[key] = entry
+}
+
+func unsupportedProtocolBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := protocolUnsupportedBackoffMin
+	for i := 1; i < failures; i++ {
+		next := delay * 2
+		if next >= unsupportedProtocolCapabilityTTL {
+			return unsupportedProtocolCapabilityTTL
+		}
+		delay = next
+	}
+	return delay
 }
 
 // unsupportedRetrySummaries 返回各渠道仍在等待重探的协议能力哨兵。
-// 成功能力不属于临时状态；过期哨兵在生成快照时一并清理。
+// 成功能力不属于临时状态；空闲到期条目在生成快照时删除。
 func (c *protocolCapabilityCache) unsupportedRetrySummaries(now time.Time) map[int64]protocolProbeRetrySummary {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	summaries := make(map[int64]protocolProbeRetrySummary)
 	for key, entry := range c.entries {
+		if protocolCapabilityIdleExpired(entry, now) {
+			delete(c.entries, key)
+			continue
+		}
 		if entry.upstream != protocolUnsupported {
 			continue
 		}
 		if !entry.retryAfter.After(now) {
-			delete(c.entries, key)
 			continue
 		}
 		summary := summaries[key.channelID]
@@ -266,8 +322,75 @@ func (c *protocolCapabilityCache) unsupportedRetrySummaries(now time.Time) map[i
 	return summaries
 }
 
+func (c *protocolCapabilityCache) evictExpired(now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	removed := 0
+	for key, entry := range c.entries {
+		if !protocolCapabilityIdleExpired(entry, now) {
+			continue
+		}
+		delete(c.entries, key)
+		removed++
+	}
+	return removed
+}
+
 func (c *protocolCapabilityCache) clear() {
 	c.mu.Lock()
 	clear(c.entries)
 	c.mu.Unlock()
+}
+
+func (s *Server) protocolCapabilityCleanupLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(protocolCapabilityCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.shutdownCh:
+			return
+		case now := <-ticker.C:
+			s.protocolCapabilities.evictExpired(now)
+		}
+	}
+}
+
+// protocolCapabilitySessionID scopes auto-protocol learning to one client
+// conversation. Explicit session headers win. Anthropic body session_id and the
+// auth token hash are fallbacks so SDK clients that omit session headers still
+// learn after the first probe instead of 404-probing every turn. Per-request
+// IDs such as x-client-request-id are intentionally ignored.
+func protocolCapabilitySessionID(reqCtx *proxyRequestContext) string {
+	if reqCtx == nil {
+		return ""
+	}
+	if reqCtx.header != nil {
+		if sid := responsesExecutionSessionID(reqCtx.header); sid != "" {
+			return sid
+		}
+		if sid := strings.TrimSpace(reqCtx.header.Get("X-Claude-Code-Session-Id")); sid != "" {
+			if thread := strings.TrimSpace(reqCtx.header.Get("Thread-Id")); thread != "" {
+				return sid + "\x00thread\x00" + thread
+			}
+			return sid
+		}
+		for _, name := range []string{"x-opencode-session", "x-session-id"} {
+			if sid := strings.TrimSpace(reqCtx.header.Get(name)); sid != "" {
+				return sid
+			}
+		}
+	}
+	if reqCtx.routingSession != nil {
+		if sid := strings.TrimSpace(reqCtx.routingSession.storeKey); sid != "" {
+			return sid
+		}
+	}
+	if sid := strings.TrimSpace(anthropicSessionIDFromRequest(reqCtx.body)); sid != "" {
+		return sid
+	}
+	if h := strings.TrimSpace(reqCtx.tokenHash); h != "" {
+		return "tok:" + h
+	}
+	return ""
 }

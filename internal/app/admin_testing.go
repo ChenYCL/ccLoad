@@ -23,6 +23,7 @@ import (
 	"ccLoad/internal/codexauth"
 	"ccLoad/internal/cooldown"
 	"ccLoad/internal/cursorauth"
+	"ccLoad/internal/githubcopilotauth"
 	"ccLoad/internal/model"
 	"ccLoad/internal/protocol"
 	"ccLoad/internal/testutil"
@@ -940,6 +941,28 @@ func (s *Server) prepareOAuthChannelTestAuthForRejectedToken(
 		selection.requestCredential = credential.AccessToken
 		if err != nil {
 			return cfg.Clone(), selection, true, fmt.Errorf("加载 Anthropic OAuth 凭证失败: %w", err)
+		}
+		return cfg.Clone(), selection, true, nil
+	case cfg.UsesGitHubCopilotOAuth():
+		var credential *githubcopilotauth.Credential
+		var err error
+		switch mode {
+		case oauthCredentialUseCurrent:
+			credential, err = githubcopilotauth.ParseCredential([]byte(cfg.OAuthCredential))
+		case oauthCredentialForceRefresh:
+			credential, err = s.githubCopilotCredentials.credential(ctx, cfg, true)
+		default:
+			credential, err = s.githubCopilotCredentials.credential(ctx, cfg, false)
+		}
+		if credential == nil {
+			if err == nil {
+				err = errors.New("github copilot credential is unavailable")
+			}
+			return nil, selection, true, fmt.Errorf("加载 GitHub Copilot 凭证失败: %w", err)
+		}
+		selection.requestCredential = credential.CopilotToken
+		if err != nil {
+			return cfg.Clone(), selection, true, fmt.Errorf("加载 GitHub Copilot 凭证失败: %w", err)
 		}
 		return cfg.Clone(), selection, true, nil
 	case cfg.UsesZAIOAuth():

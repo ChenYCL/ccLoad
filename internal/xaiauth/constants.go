@@ -36,7 +36,9 @@ const (
 	// CLIClientVersionHeader names the xAI CLI version header.
 	CLIClientVersionHeader = "x-grok-client-version"
 	// CLIClientVersion is the emulated xAI CLI protocol version.
-	CLIClientVersion = "0.2.120"
+	// cli-chat-proxy rejects below 1.0.13 with HTTP 426; 1.0.46 matches
+	// current official ccLoad.
+	CLIClientVersion = "1.0.46"
 	// CLIUserAgent is the fixed xAI model-request user agent.
 	CLIUserAgent = "xai-grok-workspace/" + CLIClientVersion
 	// CLIClientIdentifierHeader identifies Grok CLI requests to chat-proxy.
